@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Tabla HTML básica</title>
+  <style>
+    .tabla-responsive { max-width: 800px; overflow-x: auto; margin: 16px auto; }
+    table { width: 100%; border-collapse: collapse; }
+    caption { text-align: left; font-weight: 600; margin-bottom: 8px; }
+    th, td { border: 1px solid #ccc; padding: 8px 10px; text-align: left; }
+    thead th { position: sticky; top: 0; background: #f3f3f3; }
+    tbody tr:nth-child(even) { background: #fafafa; } /* zebra */
+    tfoot td { font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="tabla-responsive">
+    <table>
+      <caption>Ventas de la semana</caption>
+      <thead>
+        <tr>
+          <th scope="col">Producto</th>
+          <th scope="col">Precio</th>
+          <th scope="col">Cantidad</th>
+          <th scope="col">Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Cuaderno A5</td>
+          <td>$45.00</td>
+          <td>3</td>
+          <td>$135.00</td>
+        </tr>
+        <tr>
+          <td>Pluma gel</td>
+          <td>$20.00</td>
+          <td>5</td>
+          <td>$100.00</td>
+        </tr>
+        <tr>
+          <td>Marcadores</td>
+          <td>$80.00</td>
+          <td>2</td>
+          <td>$160.00</td>
+        </tr>
+      </tbody>
+      <tfoot>
+        <tr>
+          <td colspan="3">Total general</td>
+          <td>$395.00</td>
+        </tr>
+      </tfoot>
+    </table>
+  </div>
+</body>
+</html>
+  
