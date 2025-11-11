@@ -32,6 +32,30 @@ function h(string $s): string
 $cuenta  = isset($_GET['cuenta'])  ? (int)$_GET['cuenta'] : 0;
 $resumen = isset($_GET['resumen']) ? (string)$_GET['resumen'] : '';
 $buscar  = isset($_GET['buscar'])  ? (string)$_GET['buscar'] : '';
+// Umbral de aprobación (porcentaje)
+$pass = 7;
+// Parcial activo (1,2,3)
+$parcial = isset($_GET['parcial']) ? (int)$_GET['parcial'] : 1;
+if ($parcial < 1 || $parcial > 3) {
+    $parcial = 1;
+}
+
+// Helper: intenta ejecutar una consulta preparada; si falla y se suministra fallback, lo ejecuta
+function tryPrepareExecute(PDO $pdo, string $sql, array $params = [], ?string $fallbackSql = null, array $fallbackParams = []): PDOStatement
+{
+    try {
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        return $stmt;
+    } catch (PDOException $e) {
+        if ($fallbackSql !== null) {
+            $stmt = $pdo->prepare($fallbackSql);
+            $stmt->execute($fallbackParams);
+            return $stmt;
+        }
+        throw $e;
+    }
+}
 
 ?>
 <!doctype html>
@@ -166,16 +190,34 @@ $buscar  = isset($_GET['buscar'])  ? (string)$_GET['buscar'] : '';
 
 <body>
     <div class="wrap">
-        <h1>Alumnos y promedios <span class="chip">Primer Parcial</span></h1>
+        <h1>Alumnos y promedios <span class="chip"><?php $pLabels = [1 => 'Primer', 2 => 'Segundo', 3 => 'Tercer'];
+                                                    echo h($pLabels[$parcial] . ' Parcial'); ?></span></h1>
 
         <!-- Formulario de búsqueda -->
         <form method="GET" class="search-form">
             <input type="text" name="buscar" placeholder="Buscar alumno por nombre..." value="<?php echo h($buscar); ?>">
             <button type="submit">🔍 Buscar</button>
             <?php if ($buscar): ?>
-                <a href="?" style="padding: 8px 16px; background: #ef4444; color: white; border-radius: 4px; text-decoration: none; display: flex; align-items: center;">✕ Limpiar</a>
+                <a href="?parcial=<?php echo $parcial; ?>" style="padding: 8px 16px; background: #ef4444; color: white; border-radius: 4px; text-decoration: none; display: flex; align-items: center;">✕ Limpiar</a>
             <?php endif; ?>
         </form>
+
+        <!-- Pestañas de parciales -->
+        <div style="margin-bottom:12px; display:flex; gap:8px;">
+            <?php
+            function url_with_parcial(int $n): string
+            {
+                $qs = $_GET;
+                $qs['parcial'] = $n;
+                return '?' . http_build_query($qs);
+            }
+            $labels = [1 => 'Primer', 2 => 'Segundo', 3 => 'Tercer'];
+            foreach ($labels as $n => $label) {
+                $active = ($parcial === $n) ? 'background:#111827;color:#fff;' : 'background:#f3f4f6;color:#111827;';
+                echo '<a class="actions" href="' . url_with_parcial($n) . '" style="padding:8px 12px;border-radius:6px;text-decoration:none; ' . $active . '">' . h($label) . ' parcial</a>';
+            }
+            ?>
+        </div>
 
         <?php
         // 1) Detalle de un alumno específico
@@ -192,15 +234,23 @@ $buscar  = isset($_GET['buscar'])  ? (string)$_GET['buscar'] : '';
                 echo "<h2>Detalle del alumno: " . h($nombre) . " <span class='chip'>" . $cuenta . "</span></h2>";
 
                 // Tabla de materias del alumno (usa la columna Promedio)
-                $stmt = $pdo->prepare("
+                $sqlDetailParcial = "
+            SELECT materia,
+                   HeteroEvaluacion, CoEvaluacion, AutoEvaluacion,
+                   promedio AS promedio
+            FROM vw_alumno_materia am
+            WHERE Numero_D_Cuenta = ? AND am.parcial = ?
+            ORDER BY materia
+        ";
+                $sqlDetailNoPar = "
             SELECT materia,
                    HeteroEvaluacion, CoEvaluacion, AutoEvaluacion,
                    promedio AS promedio
             FROM vw_alumno_materia
             WHERE Numero_D_Cuenta = ?
             ORDER BY materia
-        ");
-                $stmt->execute([$cuenta]);
+        ";
+                $stmt = tryPrepareExecute($pdo, $sqlDetailParcial, [$cuenta, $parcial], $sqlDetailNoPar, [$cuenta]);
 
                 echo '<table>';
                 echo '<tr><th>Materia</th><th>Hetero</th><th>Co</th><th>Auto</th><th>promedio</th></tr>';
@@ -216,13 +266,18 @@ $buscar  = isset($_GET['buscar'])  ? (string)$_GET['buscar'] : '';
                 echo '</table>';
 
                 // Promedio global del alumno (usa AVG(Promedio))
-                $stmt = $pdo->prepare("
+                $sqlAvgPar = "
+            SELECT ROUND(AVG(Promedio), 2) AS promedio_global
+            FROM vw_alumno_materia am
+            WHERE Numero_D_Cuenta = ? AND am.parcial = ?
+        ";
+                $sqlAvgNoPar = "
             SELECT ROUND(AVG(Promedio), 2) AS promedio_global
             FROM vw_alumno_materia
             WHERE Numero_D_Cuenta = ?
-        ");
-                $stmt->execute([$cuenta]);
-                $promedioGlobal = $stmt->fetchColumn();
+        ";
+                $stmtAvg = tryPrepareExecute($pdo, $sqlAvgPar, [$cuenta, $parcial], $sqlAvgNoPar, [$cuenta]);
+                $promedioGlobal = $stmtAvg->fetchColumn();
 
                 echo "<p><strong>Promedio global:</strong> " . h((string)$promedioGlobal) . "</p>";
                 echo '<p class="actions"><a class="back" href="?">⟵ Volver</a></p>';
@@ -230,18 +285,26 @@ $buscar  = isset($_GET['buscar'])  ? (string)$_GET['buscar'] : '';
 
             // 2) Resumen por materia (usa AVG(Promedio))
         } elseif ($resumen === 'materias') {
-            $sql = "
+            // Resumen por materia con inscritos, % reprobadas, % aprobadas y promedio
+            // Construir SQL (intentaremos ejecutar con filtro parcial y si falla haremos fallback sin filtro)
+            $sqlBase = "
         SELECT materia,
-               ROUND(AVG(promedio), 2) AS promedio_materia,
-               COUNT(*) AS inscritos
+               COUNT(*) AS inscritos,
+               SUM(CASE WHEN promedio < ? THEN 1 ELSE 0 END) AS reprobadas,
+               ROUND(100 * SUM(CASE WHEN promedio < ? THEN 1 ELSE 0 END) / COUNT(*), 2) AS pct_reprobadas,
+               ROUND(100 * SUM(CASE WHEN promedio >= ? THEN 1 ELSE 0 END) / COUNT(*), 2) AS pct_aprobadas,
+               ROUND(AVG(promedio), 2) AS promedio_materia
         FROM vw_alumno_materia
-        GROUP BY materia
-        ORDER BY materia
-    ";
-            $stmt = $pdo->query($sql);
+        ";
+            $sqlWithPar = $sqlBase . " WHERE parcial = ? GROUP BY materia ORDER BY materia";
+            $sqlNoPar = $sqlBase . " GROUP BY materia ORDER BY materia";
+            $paramsWithPar = [$pass, $pass, $pass, $parcial];
+            $paramsNoPar = [$pass, $pass, $pass];
+            $stmt = tryPrepareExecute($pdo, $sqlWithPar, $paramsWithPar, $sqlNoPar, $paramsNoPar);
 
             echo '<h2>Promedios por materia</h2>';
-            echo '<table><tr><th>Materia</th><th>promedio</th><th>Inscritos</th></tr>';
+            // Tabla principal (detalle por materia)
+            echo '<table><tr><th>Materia</th><th>Promedio</th><th>Inscritos</th></tr>';
             foreach ($stmt as $row) {
                 $materia = $row['materia'];
                 echo '<tr>';
@@ -250,17 +313,27 @@ $buscar  = isset($_GET['buscar'])  ? (string)$_GET['buscar'] : '';
                 echo '<td>' . h((string)$row['inscritos']) . '</td>';
                 echo '</tr>';
 
-                // Mostrar alumnos que reprobaron (promedio < 70)
-                $stmtReprobados = $pdo->prepare("
-                    SELECT a.Numero_D_Cuenta,
-                           a.Nombre_D_Alumno,
-                           am.promedio
-                    FROM vw_alumno_materia am
-                    JOIN Alumnos a ON a.Numero_D_Cuenta = am.Numero_D_Cuenta
-                    WHERE CAST(am.materia AS CHAR) = ? AND am.promedio < 7
-                    ORDER BY am.promedio ASC
-                ");
-                $stmtReprobados->execute([$materia]);
+                // Mostrar alumnos que reprobaron (promedio < $pass)
+                // Mostrar alumnos que reprobaron (promedio < $pass)
+                $sqlReprobPar = "
+                            SELECT a.Numero_D_Cuenta,
+                                   a.Nombre_D_Alumno,
+                                   am.promedio
+                            FROM vw_alumno_materia am
+                            JOIN Alumnos a ON a.Numero_D_Cuenta = am.Numero_D_Cuenta
+                            WHERE CAST(am.materia AS CHAR) = ? AND am.parcial = ? AND am.promedio < ?
+                            ORDER BY am.promedio ASC
+                        ";
+                $sqlReprobNoPar = "
+                            SELECT a.Numero_D_Cuenta,
+                                   a.Nombre_D_Alumno,
+                                   am.promedio
+                            FROM vw_alumno_materia am
+                            JOIN Alumnos a ON a.Numero_D_Cuenta = am.Numero_D_Cuenta
+                            WHERE CAST(am.materia AS CHAR) = ? AND am.promedio < ?
+                            ORDER BY am.promedio ASC
+                        ";
+                $stmtReprobados = tryPrepareExecute($pdo, $sqlReprobPar, [$materia, $parcial, $pass], $sqlReprobNoPar, [$materia, $pass]);
                 $reprobados = $stmtReprobados->fetchAll();
 
                 if (!empty($reprobados)) {
@@ -278,13 +351,45 @@ $buscar  = isset($_GET['buscar'])  ? (string)$_GET['buscar'] : '';
                 }
             }
             echo '</table>';
+
+            // Tabla resumen por materia (inscritos, reprobadas, aprobadas en % y promedio)
+            $sqlSummaryBase = "
+        SELECT materia,
+               COUNT(*) AS inscritos,
+               SUM(CASE WHEN promedio < ? THEN 1 ELSE 0 END) AS reprobadas,
+               SUM(CASE WHEN promedio >= ? THEN 1 ELSE 0 END) AS aprobadas,
+               ROUND(AVG(promedio),2) AS promedio_materia
+        FROM vw_alumno_materia
+        ";
+            $sqlSummaryWithPar = $sqlSummaryBase . " WHERE parcial = ? GROUP BY materia ORDER BY materia";
+            $sqlSummaryNoPar = $sqlSummaryBase . " GROUP BY materia ORDER BY materia";
+            $stmtSummary = tryPrepareExecute($pdo, $sqlSummaryWithPar, [$pass, $pass, $parcial], $sqlSummaryNoPar, [$pass, $pass]);
+
+            echo '<h3>Resumen por materia</h3>';
+            echo '<table>';
+            echo '<tr><th>Materia</th><th>Inscritos</th><th>Reprobadas</th><th>Aprobadas</th><th>Promedio</th></tr>';
+            foreach ($stmtSummary as $s) {
+                $inscritos = (int)$s['inscritos'];
+                $reprobadas = (int)$s['reprobadas'];
+                $aprobadas = (int)$s['aprobadas'];
+                $porReprob = $inscritos > 0 ? round(($reprobadas * 100) / $inscritos, 2) : 0;
+                $porApro = $inscritos > 0 ? round(($aprobadas * 100) / $inscritos, 2) : 0;
+                echo '<tr>';
+                echo '<td>' . h((string)$s['materia']) . '</td>';
+                echo '<td>' . h((string)$inscritos) . '</td>';
+                echo '<td>' . h((string)$reprobadas) . ' (' . h((string)$porReprob) . '%)</td>';
+                echo '<td>' . h((string)$aprobadas) . ' (' . h((string)$porApro) . '%)</td>';
+                echo '<td>' . h((string)$s['promedio_materia']) . '</td>';
+                echo '</tr>';
+            }
+            echo '</table>';
             echo '<p class="actions"><a class="back" href="?">⟵ Volver</a></p>';
 
             // 3) Resumen por alumno (usa AVG(Promedio))
         } else {
-            // Construir la consulta con o sin filtro de búsqueda
+            // Construir la consulta con o sin filtro de búsqueda, preferente filtro por parcial si existe
             if (!empty($buscar)) {
-                $sql = "
+                $sqlBase = "
             SELECT a.Numero_D_Cuenta,
                    a.Nombre_D_Alumno,
                    ROUND(AVG(am.promedio), 2) AS promedio_global,
@@ -292,23 +397,22 @@ $buscar  = isset($_GET['buscar'])  ? (string)$_GET['buscar'] : '';
             FROM vw_alumno_materia am
             JOIN Alumnos a ON a.Numero_D_Cuenta = am.Numero_D_Cuenta
             WHERE a.Nombre_D_Alumno LIKE ?
-            GROUP BY a.Numero_D_Cuenta, a.Nombre_D_Alumno
-            ORDER BY a.Nombre_D_Alumno
-        ";
-                $stmt = $pdo->prepare($sql);
-                $stmt->execute(['%' . $buscar . '%']);
+            ";
+                $sqlWithPar = $sqlBase . " AND am.parcial = ? GROUP BY a.Numero_D_Cuenta, a.Nombre_D_Alumno ORDER BY a.Nombre_D_Alumno";
+                $sqlNoPar = $sqlBase . " GROUP BY a.Numero_D_Cuenta, a.Nombre_D_Alumno ORDER BY a.Nombre_D_Alumno";
+                $stmt = tryPrepareExecute($pdo, $sqlWithPar, ['%' . $buscar . '%', $parcial], $sqlNoPar, ['%' . $buscar . '%']);
             } else {
-                $sql = "
+                $sqlBase = "
             SELECT a.Numero_D_Cuenta,
                    a.Nombre_D_Alumno,
                    ROUND(AVG(am.promedio), 2) AS promedio_global,
                    COUNT(*) AS materias_cursadas
             FROM vw_alumno_materia am
             JOIN Alumnos a ON a.Numero_D_Cuenta = am.Numero_D_Cuenta
-            GROUP BY a.Numero_D_Cuenta, a.Nombre_D_Alumno
-            ORDER BY a.Nombre_D_Alumno
-        ";
-                $stmt = $pdo->query($sql);
+            ";
+                $sqlWithPar = $sqlBase . " WHERE am.parcial = ? GROUP BY a.Numero_D_Cuenta, a.Nombre_D_Alumno ORDER BY a.Nombre_D_Alumno";
+                $sqlNoPar = $sqlBase . " GROUP BY a.Numero_D_Cuenta, a.Nombre_D_Alumno ORDER BY a.Nombre_D_Alumno";
+                $stmt = tryPrepareExecute($pdo, $sqlWithPar, [$parcial], $sqlNoPar, []);
             }
 
             echo '<h2>Promedios por alumno</h2>';
@@ -330,7 +434,7 @@ $buscar  = isset($_GET['buscar'])  ? (string)$_GET['buscar'] : '';
             echo '</table>';
 
             echo '<div class="grid">';
-            echo '  <div><a class="actions" href="?resumen=materias"><span>🔎 Ver promedios por materia</span></a></div>';
+            echo '  <div><a class="actions" href="?resumen=materias&parcial=' . $parcial . '"><span>🔎 Ver promedios por materia</span></a></div>';
             echo '</div>';
         }
         ?>
